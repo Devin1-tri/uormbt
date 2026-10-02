@@ -20,7 +20,6 @@ import uorm_lib as U  # noqa: E402
 QUIET = "--quiet" in sys.argv
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 BASE_RATE = 1.3          # mining.base_rate_per_hour from app_config
-SOCIAL = ["social_x", "social_telegram", "social_youtube", "twitter_repost"]
 
 
 def log(*a):
@@ -50,14 +49,12 @@ def run_account(label, acc):
     else:
         row["lucky_box"] = f"cooldown {(st or {}).get('remaining_ms', '?')}" if code == 200 else f"ERR {code}"
 
-    # --- missions: data-driven from the server's own progress list, so new
-    #     missions (e.g. social_post_x) are picked up automatically
+    # --- missions: fully catalog-driven, so ANY mission the developers add later
+    #     (new id, new type) is picked up automatically — nothing is hardcoded.
     claimed = []
     code, mis = U.rpc(acc, "get_missions")
     catalog = {m["id"]: m for m in (mis.get("catalog") or [])} if code == 200 else {}
     progress = {p["mission_id"]: p for p in (mis.get("progress") or [])} if code == 200 else {}
-    social_ids = [mid for mid, m in catalog.items() if m.get("type") == "social"]
-    timed_ids = [mid for mid, m in catalog.items() if m.get("type") in ("daily", "weekly")]
 
     def claim(mid):
         c, r = U.rpc(acc, "claim_mission", {"p_mission_id": mid})
@@ -66,20 +63,20 @@ def run_account(label, acc):
             return True
         return False
 
-    # 1) everything the server already marks completed but unclaimed
+    def is_claimed(mid):
+        return bool((progress.get(mid) or {}).get("claimed"))
+
+    # 1) anything the server already marks completed but unclaimed
     for mid, pr in progress.items():
         if pr.get("completed") and not pr.get("claimed"):
             claim(mid)
-    # 2) social missions: the mark is honour-based, then the claim pays out
-    for mid in social_ids:
-        if not (progress.get(mid) or {}).get("claimed"):
+    # 2) every unclaimed mission in the catalog: honour-based mark first (a no-op
+    #    for missions that verify themselves), then claim; failures are harmless
+    for mid in catalog:
+        if not is_claimed(mid):
             U.rpc(acc, "mark_social_mission", {"p_mission_id": mid})
             claim(mid)
-    # 3) dailies / weeklies whose requirement is met
-    for mid in timed_ids:
-        if not (progress.get(mid) or {}).get("claimed"):
-            claim(mid)
-    # 4) bundles (whichever type is ready)
+    # 3) bundles (whichever type is ready)
     for btype in ("daily", "weekly"):
         c, r = U.rpc(acc, "claim_mission_bundle", {"p_type": btype})
         if c == 200:
@@ -89,24 +86,33 @@ def run_account(label, acc):
     row["daily"] = claimed or "-"
 
     # --- mining: restart finished sessions, keep one running
+    import datetime
     sessions = U.mining_sessions(acc)
     now = time.time()
-    action = []
+    action, warn = [], None
     for s in sessions:
-        started = s["started_at"].replace("Z", "+00:00")
-        import datetime
-        t0 = datetime.datetime.fromisoformat(started).timestamp()
+        t0 = datetime.datetime.fromisoformat(s["started_at"].replace("Z", "+00:00")).timestamp()
         dur = (s.get("session_duration_ms") or 86400000) / 1000.0
         if now - t0 >= dur:
             c, r = U.rpc(acc, "claim_mining_session", {"p_session_id": s["id"]})
             action.append(f"claimed {s['id'][:8]} -> {json.dumps(r)[:80]}")
+            if c != 200:
+                over = (now - t0 - dur) / 3600.0
+                warn = f"session {s['id'][:8]} lewat {over:.1f} jam tapi claim gagal: {json.dumps(r)[:80]}"
+                # a completed-but-unclaimed session can block new ones: try anyway
+                c2, r2 = U.rpc(acc, "start_mining_session", {"p_rate_per_hour": BASE_RATE})
+                action.append(f"retry start -> {json.dumps(r2)[:80]}")
         else:
             c, r = U.rpc(acc, "refresh_mining_session_rate")
             action.append(f"running {s['id'][:8]} rate={(r or {}).get('rate_per_hour')}")
     if not sessions:
         c, r = U.rpc(acc, "start_mining_session", {"p_rate_per_hour": BASE_RATE})
         action.append(f"started {json.dumps(r)[:110]}")
+        if c != 200:
+            warn = f"gagal start mining: {json.dumps(r)[:80]}"
     row["mining"] = action
+    if warn:
+        row["warning"] = warn
 
     p = U.profile(acc)
     row["coins"] = p.get("total_coins")
@@ -126,7 +132,9 @@ def digest(rows):
             continue
         out.append(f"• {r['label']} ({r.get('ref_code')}): {r.get('coins')} coins · {r.get('rank')} · "
                    f"streak {r.get('streak')} · refs {r.get('refs')}")
-        out.append(f"   bonus {r.get('daily_bonus')} · box {r.get('lucky_box')} · social {r.get('social')} · daily {r.get('daily')}")
+        if r.get("warning"):
+            out.append(f"   ⚠️ {r['warning']}")
+        out.append(f"   bonus {r.get('daily_bonus')} · box {r.get('lucky_box')} · missions {r.get('missions')}")
         out.append(f"   mining: {r.get('mining')}")
     return "\n".join(out)
 

@@ -77,7 +77,8 @@ def snapshot(label, acc):
             t0 = datetime.datetime.fromisoformat(s["started_at"].replace("Z", "+00:00")).timestamp()
             dur = (s.get("session_duration_ms") or 86400000) / 1000.0
             row["mining"] = {"rate": s.get("rate_per_hour"), "left": max(0, t0 + dur - time.time()),
-                             "mult": s.get("boost_multiplier") or 1}
+                             "mult": s.get("boost_multiplier") or 1,
+                             "overdue": round((time.time() - t0 - dur) / 3600.0, 1)}
         else:
             row["mining"] = None
         cb, lb = U.rpc(acc, "get_lucky_box_status")
@@ -118,10 +119,13 @@ def render(rows, st):
         lines.append(c("│ ", "cyan") + c(fit(sub1, W - 2), "gray") + c("│", "cyan"))
         m = r.get("mining")
         if m:
-            mk = f"     mining {m['rate']}/h x{m['mult']} · sisa {hms(m['left'])}"
+            if m.get("overdue", 0) > 0:
+                mk = f"     ⚠ mining sesi lewat {m['overdue']}h — menunggu claim berhasil (rate {m['rate']}/h)"
+            else:
+                mk = f"     mining {m['rate']}/h x{m['mult']} · sisa {hms(m['left'])}"
         else:
             mk = "     mining: TIDAK ADA sesi aktif — akan di-start di cycle berikutnya"
-        lines.append(c("│ ", "cyan") + c(fit(mk, W - 2), "green" if m else "yellow") + c("│", "cyan"))
+        lines.append(c("│ ", "cyan") + c(fit(mk, W - 2), "red" if (m and m.get("overdue", 0) > 0) else ("green" if m else "yellow")) + c("│", "cyan"))
         bx = r.get("box")
         bonus = r.get("bonus") or {}
         info = (f"     lucky box {'siap dibuka' if (bx or 0) <= 0 else 'dalam ' + hms(bx)}"
