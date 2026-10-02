@@ -49,7 +49,13 @@ def load_state():
 
 
 def save_state(st):
-    json.dump(st, open(STATE, "w"), indent=1)
+    """Merge instead of clobbering — uorm_daily.config_watch() also writes here."""
+    try:
+        cur = json.load(open(STATE))
+    except Exception:
+        cur = {}
+    cur.update(st)
+    json.dump(cur, open(STATE, "w"), indent=1)
 
 
 def hms(seconds):
@@ -146,6 +152,10 @@ def render(rows, st):
     lines.append(c("│ ", "cyan") + fit(f"  perubahan: {dtxt}", W - 2) + c("│", "cyan"))
     nxt_txt = f"  cycle berikutnya: {datetime.datetime.fromtimestamp(nxt):%H:%M:%S} (dalam {hms(nxt - time.time())})" if nxt else "  cycle berikutnya: jalankan sekarang…"
     lines.append(c("│ ", "cyan") + c(fit(nxt_txt, W - 2), "yellow") + c("│", "cyan"))
+    scfg = st.get("config") or {}
+    if scfg:
+        srv = "  server: " + " · ".join(f"{k.split('.')[-1]}={v}" for k, v in scfg.items())
+        lines.append(c("│ ", "cyan") + c(fit(srv, W - 2), "gray") + c("│", "cyan"))
     lines.append(c("├" + "─" * W + "┤", "cyan"))
     lines.append(c("│ ", "cyan") + c(fit("  Ctrl+C = stop bot (tetap di screen)  ·  ./uorm.sh start = jalankan lagi", W - 2), "gray") + c("│", "cyan"))
     lines.append(c("└" + "─" * W + "┘", "cyan"))

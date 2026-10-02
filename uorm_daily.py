@@ -20,6 +20,8 @@ import uorm_lib as U  # noqa: E402
 QUIET = "--quiet" in sys.argv
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 BASE_RATE = 1.3          # mining.base_rate_per_hour from app_config
+CONFIG_WATCH = ["device.enforce", "device.block_other_login", "app.maintenance_mode",
+                "app.latest_version", "mining.base_rate_per_hour", "luckybox.cooldown_hours"]
 
 
 def log(*a):
@@ -30,6 +32,11 @@ def log(*a):
 def run_account(label, acc):
     row = {"label": label}
     U.ensure_token(acc, label)
+    try:
+        c, r = U.ensure_device(acc)
+        row["device"] = "bound" if c == 200 else f"{c} {json.dumps(r)[:60]}"
+    except Exception as e:  # noqa: BLE001
+        row["device"] = f"ERR {type(e).__name__}"
     code, resp = U.rpc(acc, "ping_daily_open")
     row["ping"] = resp if code == 200 else f"ERR {code}"
 
@@ -134,9 +141,36 @@ def digest(rows):
                    f"streak {r.get('streak')} · refs {r.get('refs')}")
         if r.get("warning"):
             out.append(f"   ⚠️ {r['warning']}")
+        if r.get("device") and r["device"] != "bound":
+            out.append(f"   ⚠️ device binding: {r['device']}")
         out.append(f"   bonus {r.get('daily_bonus')} · box {r.get('lucky_box')} · missions {r.get('missions')}")
         out.append(f"   mining: {r.get('mining')}")
     return "\n".join(out)
+
+
+def config_watch(acc=None):
+    """Alert when the developers flip a server-side switch (anti-bot, rates, versions).
+    Needs an authenticated account: app_config is not readable with the anon key."""
+    try:
+        cfg = U.app_config(acc)
+    except Exception:  # noqa: BLE001
+        return []
+    if not cfg:
+        return []
+    path = os.path.join(HERE, "state.json")
+    try:
+        st = json.load(open(path))
+    except Exception:
+        st = {}
+    prev = st.get("config") or {}
+    changed = [f"{k}: {prev.get(k)} → {cfg.get(k)}" for k in CONFIG_WATCH
+               if k in cfg and k in prev and prev.get(k) != cfg.get(k)]
+    st["config"] = {k: cfg.get(k) for k in CONFIG_WATCH if k in cfg}
+    try:
+        json.dump(st, open(path, "w"), indent=1)
+    except Exception:  # noqa: BLE001
+        pass
+    return changed
 
 
 def main(labels=None):
@@ -154,6 +188,10 @@ def main(labels=None):
             rows.append({"label": lb, "error": f"{type(e).__name__}: {e}"})
     U.save_accounts(accs)
     text = digest(rows)
+    first = next((accs[l] for l in labels if l in accs), None)
+    changes = config_watch(first)
+    if changes:
+        text += "\n⚙️ Perubahan config server:\n  " + "\n  ".join(changes)
     print(text)
     return rows
 

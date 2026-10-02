@@ -162,6 +162,25 @@ def profile(acc):
     return (r.json() or [{}])[0] if r.status_code == 200 else {}
 
 
+def app_config(acc=None):
+    """Server-side switches (device.enforce, maintenance, versions, rates…)."""
+    h = headers(acc) if acc else anon_headers()
+    r = requests.get(f"{SUPA}/rest/v1/app_config?select=key,value,updated_at", headers=h, timeout=25)
+    if r.status_code != 200:
+        return {}
+    return {row["key"]: row["value"] for row in r.json()}
+
+
+def ensure_device(acc):
+    """Bind a stable per-account device hash. UORM's `device.enforce` switch can be
+    flipped on by the developers at any time; claiming a hash once keeps the account
+    looking like a normal install and is a no-op afterwards."""
+    import uuid
+    if not acc.get("device_hash"):
+        acc["device_hash"] = uuid.uuid4().hex
+    return rpc(acc, "device_account_claim", {"p_device_hash": acc["device_hash"]})
+
+
 def mining_sessions(acc):
     r = requests.get(f"{SUPA}/rest/v1/mining_sessions?select=*&user_id=eq.{acc['user_id']}"
                      "&claimed=eq.false&order=started_at.desc&limit=3", headers=headers(acc), timeout=25)
