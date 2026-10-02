@@ -38,18 +38,26 @@ body = r.json()
 print("new_email pending:", body.get("new_email"))
 
 t0 = time.time()
-code = None
-while time.time() - t0 < 180 and not code:
+
+
+def fresh_codes(since):
+    """address -> 6-digit code, from messages newer than `since`."""
+    out = {}
     try:
         c = json.load(open(U.GMAIL_CREDS))
-        M = imaplib.IMAP4_SSL(c["imap_host"]); M.login(c["email"], c["app_password"]); M.select("INBOX")
+        M = imaplib.IMAP4_SSL(c["imap_host"])
+        M.login(c["email"], c["app_password"])
+        M.select("INBOX")
         for who in (new_email, old):
             typ, data = M.search(None, f'(TO "{who}")')
-            for i in reversed(data[0].split()[-4:]):
+            for i in reversed(data[0].split()[-6:]):
                 typ, d = M.fetch(i, "(RFC822)")
                 msg = _em.message_from_bytes(d[0][1])
-                ts = _em.utils.parsedate_to_datetime(msg.get("Date")).timestamp() if msg.get("Date") else 0
-                if ts < t0 - 60:
+                try:
+                    ts = _em.utils.parsedate_to_datetime(msg.get("Date")).timestamp()
+                except Exception:
+                    ts = 0
+                if ts < since:
                     continue
                 txt = ""
                 for part in (msg.walk() if msg.is_multipart() else [msg]):
@@ -57,36 +65,97 @@ while time.time() - t0 < 180 and not code:
                         txt += part.get_payload(decode=True).decode(errors="ignore")
                 flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt))
                 m = re.search(r"\b(\d{6})\b", flat)
-                if m and "change" in (msg.get("Subject", "") + flat).lower():
-                    code = m.group(1)
-                    print("got email-change code from", who)
-                    break
-            if code:
-                break
+                if m:
+                    out.setdefault(who, m.group(1))
         M.logout()
     except Exception as e:  # noqa: BLE001
-        print("imap:", type(e).__name__)
-    if not code:
-        time.sleep(10)
+        print("imap:", type(e).__name__, e)
+    return out
 
-if code:
-    for who in (new_email, old):
-        rr = requests.post(U.SUPA + "/auth/v1/verify", headers=U.anon_headers(),
-                           json={"type": "email_change", "email": who, "token": code}, timeout=30)
-        print(f"verify({who}):", rr.status_code, rr.text[:120])
-        if rr.status_code == 200 and rr.json().get("access_token"):
-            acc["access_token"] = rr.json()["access_token"]
-            acc["refresh_token"] = rr.json().get("refresh_token", acc.get("refresh_token"))
-            break
 
-me = requests.get(U.SUPA + "/auth/v1/user", headers=U.headers(acc), timeout=25)
-if me.status_code == 200:
-    u = me.json()
-    print("current email:", u.get("email"), "| pending:", u.get("new_email"))
-    if u.get("email") == new_email:
-        acc["email"] = new_email
-        accs[label] = acc
-        U.save_accounts(accs)
-        print("✅ EMAIL_CHANGED")
-    else:
-        print("⚠️ still pending — run again later")
+# Supabase "secure email change": one mail per address, a different 6-digit token each.
+# Observed behaviour of this project (probed 2026-10-02):
+#   verify(email=OLD, token=<code mailed to OLD>) -> 200 "Confirmation link accepted…"
+#   verify(email=NEW, token=<code mailed to NEW>) -> 403 otp_expired
+# So the OLD address is the lookup key for BOTH sides; the second side needs the token
+# that was mailed to the NEW address. Try that first, then fall back to the other combos.
+def fetch_codes(since):
+    """(code mailed to NEW address, code mailed to OLD address) — exact To-header match."""
+    cn = co = None
+    try:
+        c = json.load(open(U.GMAIL_CREDS))
+        M = imaplib.IMAP4_SSL(c["imap_host"])
+        M.login(c["email"], c["app_password"])
+        M.select("INBOX")
+        typ, data = M.search(None, "ALL")
+        for i in reversed(data[0].split()[-15:]):
+            typ, d = M.fetch(i, "(RFC822)")
+            msg = _em.message_from_bytes(d[0][1])
+            to = _em.utils.parseaddr(msg.get("To", ""))[1].lower()
+            if to not in (new_email, old):
+                continue
+            if "new uorm" not in (msg.get("Subject") or "").lower():
+                continue
+            try:
+                ts = _em.utils.parsedate_to_datetime(msg.get("Date")).timestamp()
+            except Exception:
+                ts = 0
+            if ts < since:
+                continue
+            txt = ""
+            for part in (msg.walk() if msg.is_multipart() else [msg]):
+                if part.get_content_type() in ("text/plain", "text/html"):
+                    txt += part.get_payload(decode=True).decode(errors="ignore")
+            m = re.search(r"\b(\d{6})\b", re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt)))
+            if not m:
+                continue
+            if to == new_email and not cn:
+                cn = m.group(1)
+            if to == old and not co:
+                co = m.group(1)
+        M.logout()
+    except Exception as e:  # noqa: BLE001
+        print("imap:", type(e).__name__, e)
+    return cn, co
+
+
+def verify(email_param, token):
+    rr = requests.post(U.SUPA + "/auth/v1/verify", headers=U.anon_headers(),
+                       json={"type": "email_change", "email": email_param, "token": token}, timeout=30)
+    print(f"  verify({email_param.split('@')[0]}, {token}) -> {rr.status_code} {rr.text[:110]}")
+    return rr
+
+
+def current_email():
+    rr = requests.get(U.SUPA + "/auth/v1/user", headers=U.headers(acc), timeout=25)
+    return rr.json().get("email") if rr.status_code == 200 else None
+
+
+cn = co = None
+deadline = time.time() + 240
+while time.time() < deadline and not (cn and co):
+    a, b = fetch_codes(t0 - 120)
+    cn, co = cn or a, co or b
+    if cn and co:
+        break
+    if time.time() < deadline - 20:
+        print(f"  menunggu kode… baru={cn} lama={co}", flush=True)
+        time.sleep(20)
+print("kode: alamat-baru-mailbox =", cn, "| alamat-lama-mailbox =", co)
+
+for email_param, tok, tag in ((old, co, "old side"), (old, cn, "new side via OLD param"),
+                              (new_email, cn, "new side via NEW param")):
+    if current_email() == new_email or not tok:
+        continue
+    verify(email_param, tok)
+
+final = current_email()
+print("current email:", final, "| pending:", new_email)
+if final == new_email:
+    acc["email"] = new_email
+    accs[label] = acc
+    U.save_accounts(accs)
+    print("✅ EMAIL_CHANGED")
+else:
+    print("⚠️ masih pending — jalankan lagi nanti")
+
