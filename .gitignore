@@ -1,7 +1,10 @@
 # secrets / runtime state — never commit
 accounts.json
 config.json
+gmail_creds.json
+state.json
 uorm_loop.log
+screen.log
 *.log
 
 # python

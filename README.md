@@ -101,28 +101,41 @@ Your own referral code appears in the daily output (it is the first 8 characters
 
 Adding more accounts = repeat step 5 with a new label. One label = one email alias = one account.
 
-### 6. Run it
+### 6. Run it — live dashboard in screen (recommended)
 
-One pass:
-
-```bash
-.venv/bin/python uorm_daily.py
-```
-
-Continuous (recommended — one pass every 6 hours):
+`screen` keeps the bot running after you close the terminal, and the dashboard tells you at a glance
+what every account is doing (coins, rank, streak, mining rate + time left, lucky-box timer, mission progress).
 
 ```bash
-screen -S uorm -dm bash -c '.venv/bin/python uorm_loop.py'
-screen -r uorm            # attach to watch it — Ctrl-A then D to detach
+# start a screen session with a shell in it
+screen -dmS uorm bash
+# launch the bot inside that session
+screen -S uorm -X stuff 'cd '"$PWD"' && ./uorm.sh start\n'
+
+# watch it any time
+screen -r uorm
 ```
 
-No `screen` on the machine? Use nohup instead:
+**Inside the screen:**
+
+| Keys | What happens |
+|---|---|
+| `Ctrl+C` | stops the bot — **you stay inside screen** (you land on a shell prompt) |
+| `./uorm.sh start` | starts the dashboard again |
+| `Ctrl+A` then `D` | detach (bot keeps running in the background) |
+| `exit` | close the session (only when you really want it gone) |
+
+Other commands:
 
 ```bash
-nohup .venv/bin/python uorm_loop.py > /dev/null 2>&1 &
+./uorm.sh once      # run one routine pass, print the digest
+./uorm.sh status    # print one dashboard snapshot (no live loop)
+./uorm.sh daemon    # headless loop, log only (no screen needed)
+./uorm.sh logs 60   # last 60 lines of the daemon log
+./uorm.sh new acc3  # create another account
 ```
 
-Want it on a scheduler (cron) instead? Any of these works:
+Prefer a scheduler instead of screen? This also works:
 
 ```cron
 0 */6 * * * cd /path/to/uormbt && .venv/bin/python uorm_daily.py --quiet
@@ -136,9 +149,11 @@ Want it on a scheduler (cron) instead? Any of these works:
 |---|---|
 | `uorm_lib.py` | Auth (sign up, read the code from IMAP, verify, refresh tokens) + thin Supabase RPC client |
 | `uorm_daily.py` | The routine: check-in, lucky box, mining keep-alive/restart, mission claims, digest output |
+| `uorm_dashboard.py` | Live dashboard (coins, rank, streak, mining timer, box timer, missions) + the 6-hour loop |
+| `uorm.sh` | Control script: `start`, `once`, `status`, `daemon`, `logs`, `new` |
 | `new_account.py` | `new_account.py <label> [referral_code]` — create an account |
 | `change_email.py` | `change_email.py <label> <new@email>` — move an account to another email |
-| `uorm_loop.py` | Daemon: runs the routine every `INTERVAL_H` hours (default 6), logs to `uorm_loop.log` |
+| `uorm_loop.py` | Headless loop (log only) for nohup / cron setups |
 | `config.example.json` | Template for `config.json` |
 
 ---
@@ -193,8 +208,16 @@ Isi `config.json` (URL + anon key Supabase dari dalam APK, di `assets/flutter_as
 ```bash
 python new_account.py akun1          # daftar akun
 python new_account.py akun2 KODE     # akun kedua pakai kode referral akun1
-python uorm_daily.py                 # jalankan rutin sekali
-python uorm_loop.py                  # daemon tiap 6 jam (saran: di dalam screen)
+./uorm.sh start                      # dashboard live + rutin tiap 6 jam (Ctrl+C = stop, tetap di screen)
+./uorm.sh once                       # jalankan rutin sekali
+./uorm.sh daemon                     # mode headless (log saja)
+```
+
+Jalankan di dalam screen:
+```bash
+screen -dmS uorm bash
+screen -S uorm -X stuff 'cd '"$PWD"' && ./uorm.sh start\n'
+screen -r uorm        # lihat dashboard — Ctrl+C stop bot tanpa keluar dari screen
 ```
 
 Rutinnya: check-in harian, lucky box, mining 24 jam (auto restart), plus klaim mission social & harian.

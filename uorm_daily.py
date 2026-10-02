@@ -50,35 +50,43 @@ def run_account(label, acc):
     else:
         row["lucky_box"] = f"cooldown {(st or {}).get('remaining_ms', '?')}" if code == 200 else f"ERR {code}"
 
-    # --- social missions (one-time, 17.5 each)
+    # --- missions: data-driven from the server's own progress list, so new
+    #     missions (e.g. social_post_x) are picked up automatically
     claimed = []
     code, mis = U.rpc(acc, "get_missions")
-    state = {}
-    if code == 200:
-        for m in mis.get("catalog", []):
-            state[m["id"]] = m
-    for mid in SOCIAL:
+    catalog = {m["id"]: m for m in (mis.get("catalog") or [])} if code == 200 else {}
+    progress = {p["mission_id"]: p for p in (mis.get("progress") or [])} if code == 200 else {}
+    social_ids = [mid for mid, m in catalog.items() if m.get("type") == "social"]
+    timed_ids = [mid for mid, m in catalog.items() if m.get("type") in ("daily", "weekly")]
+
+    def claim(mid):
         c, r = U.rpc(acc, "claim_mission", {"p_mission_id": mid})
         if c == 200:
             claimed.append(f"{mid}+{r.get('amount')}")
-        elif isinstance(r, dict) and "not complete" in str(r.get("message", "")):
-            U.rpc(acc, "mark_social_mission", {"p_mission_id": mid})
-            c2, r2 = U.rpc(acc, "claim_mission", {"p_mission_id": mid})
-            if c2 == 200:
-                claimed.append(f"{mid}+{r2.get('amount')}")
-    row["social"] = claimed or "already"
+            return True
+        return False
 
-    # --- daily missions
-    daily = []
-    for mid in ["daily_open", "daily_start", "daily_boost", "daily_share", "daily_invite"]:
-        c, r = U.rpc(acc, "claim_mission", {"p_mission_id": mid})
-        if c == 200:
-            daily.append(f"{mid}+{r.get('amount')}")
-    for btype in ["daily"]:
+    # 1) everything the server already marks completed but unclaimed
+    for mid, pr in progress.items():
+        if pr.get("completed") and not pr.get("claimed"):
+            claim(mid)
+    # 2) social missions: the mark is honour-based, then the claim pays out
+    for mid in social_ids:
+        if not (progress.get(mid) or {}).get("claimed"):
+            U.rpc(acc, "mark_social_mission", {"p_mission_id": mid})
+            claim(mid)
+    # 3) dailies / weeklies whose requirement is met
+    for mid in timed_ids:
+        if not (progress.get(mid) or {}).get("claimed"):
+            claim(mid)
+    # 4) bundles (whichever type is ready)
+    for btype in ("daily", "weekly"):
         c, r = U.rpc(acc, "claim_mission_bundle", {"p_type": btype})
         if c == 200:
-            daily.append(f"{btype}_bundle+{r.get('amount')}")
-    row["daily"] = daily or "-"
+            claimed.append(f"{btype}_bundle+{(r or {}).get('amount')}")
+    row["missions"] = claimed or "already"
+    row["social"] = claimed or "already"
+    row["daily"] = claimed or "-"
 
     # --- mining: restart finished sessions, keep one running
     sessions = U.mining_sessions(acc)
