@@ -154,8 +154,16 @@ def render(rows, st):
     lines.append(c("│ ", "cyan") + c(fit(nxt_txt, W - 2), "yellow") + c("│", "cyan"))
     scfg = st.get("config") or {}
     if scfg:
-        srv = "  server: " + " · ".join(f"{k.split('.')[-1]}={v}" for k, v in scfg.items())
-        lines.append(c("│ ", "cyan") + c(fit(srv, W - 2), "gray") + c("│", "cyan"))
+        short = [("device.enforce", "anti-bot"), ("app.maintenance_mode", "maintenance"),
+                 ("app.latest_version", "app"), ("mining.base_rate_per_hour", "rate/h")]
+        parts = []
+        for key, label in short:
+            if key in scfg:
+                v = scfg[key]
+                if isinstance(v, bool):
+                    v = "ON" if v else "off"
+                parts.append(f"{label}={v}")
+        lines.append(c("│ ", "cyan") + c(fit("  server: " + " · ".join(parts), W - 2), "gray") + c("│", "cyan"))
     lines.append(c("├" + "─" * W + "┤", "cyan"))
     lines.append(c("│ ", "cyan") + c(fit("  Ctrl+C = stop bot (tetap di screen)  ·  ./uorm.sh start = jalankan lagi", W - 2), "gray") + c("│", "cyan"))
     lines.append(c("└" + "─" * W + "┘", "cyan"))
