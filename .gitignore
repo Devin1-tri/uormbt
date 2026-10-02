@@ -1,0 +1,13 @@
+# secrets / runtime state — never commit
+accounts.json
+config.json
+uorm_loop.log
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# legacy per-account file (tokens live in accounts.json)
+account_a*.json

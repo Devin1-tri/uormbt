@@ -1,0 +1,10 @@
+{
+  "supabase_url": "https://<your-project>.supabase.co",
+  "anon_key": "<PUBLIC_SUPABASE_ANON_KEY from the APK: assets/flutter_assets/.env>",
+  "gmail_creds": "./gmail_creds.json",
+  "app": {
+    "package": "com.uorm.app",
+    "version": "1.0.6"
+  },
+  "note": "Copy this file to config.json and fill in your own values. supabase_url and anon_key are public/anonymous credentials shipped inside the APK."
+}
