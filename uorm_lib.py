@@ -183,7 +183,15 @@ def token_exp(acc):
 
 
 def refresh(acc, label=None):
-    """Rotate the access token. Persisted immediately (a lost update = dead token chain)."""
+    """Rotate the access token. Persisted immediately (a lost update = dead token chain).
+    Also picks up a token another process rotated since we loaded the file."""
+    if label:
+        try:
+            disk = (load_accounts().get(label) or {})
+        except Exception:  # noqa: BLE001
+            disk = {}
+        if disk.get("refresh_token") and (disk.get("refreshed") or 0) > (acc.get("refreshed") or 0):
+            acc.update({k: disk[k] for k in ("access_token", "refresh_token", "refreshed") if k in disk})
     r = _retry(lambda: requests.post(SUPA + "/auth/v1/token?grant_type=refresh_token",
                                      headers=anon_headers(), json={"refresh_token": acc["refresh_token"]},
                                      timeout=20))
