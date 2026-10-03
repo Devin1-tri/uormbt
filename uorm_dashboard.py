@@ -121,6 +121,9 @@ def render(rows, st):
     lines.append(c("├" + "─" * W + "┤", "cyan"))
 
     for r in rows:
+        if r.get("disabled"):
+            lines.append(c("│ ", "cyan") + c(fit(f"{r['label']}: ⏸ MATI — {r['disabled']}", W - 2), "yellow") + c("│", "cyan"))
+            continue
         if not r.get("ok"):
             lines.append(c("│ ", "cyan") + c(f"{r['label']}: ERROR {r.get('error', 'unknown')}".ljust(W - 2), "red") + c("│", "cyan"))
             continue
@@ -178,7 +181,16 @@ def render(rows, st):
 def gather(labels=None):
     accs = U.load_accounts()
     labels = labels or list(accs.keys())
-    return [snapshot(lb, accs[lb]) for lb in labels if lb in accs]
+    out = []
+    for lb in labels:
+        acc = accs.get(lb)
+        if not acc:
+            continue
+        if acc.get("disabled"):
+            out.append({"label": lb, "ok": False, "disabled": acc.get("disabled_reason", "-")})
+            continue
+        out.append(snapshot(lb, acc))
+    return out
 
 
 def run_cycle(rows_before, labels=None):
