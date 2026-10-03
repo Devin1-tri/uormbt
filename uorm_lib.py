@@ -68,6 +68,24 @@ def update_account(label, acc):
         f.close()
 
 
+def get_setting(key, default=None):
+    try:
+        return json.load(open(os.path.join(HERE, "config.json"))).get(key, default)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def set_setting(key, value):
+    f = _flock()
+    try:
+        path = os.path.join(HERE, "config.json")
+        cfg = json.load(open(path)) if os.path.exists(path) else {}
+        cfg[key] = value
+        json.dump(cfg, open(path, "w"), indent=1)
+    finally:
+        f.close()
+
+
 def anon_headers():
     return {"apikey": ANON, "Authorization": "Bearer " + ANON, "Content-Type": "application/json"}
 

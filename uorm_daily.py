@@ -47,6 +47,36 @@ def run_account(label, acc):
     code, resp = U.rpc(acc, "ping_daily_open")
     row["ping"] = resp if code == 200 else f"ERR {code}"
 
+    # --- boost: rewarded "watch boost" (2/day) doubles the mining rate for an hour AND
+    #     completes daily_boost / weekly_boosts. Must run BEFORE the mission claims.
+    c, bs = U.rpc(acc, "get_boost_status")
+    row["boost"] = f"{bs.get('used')}/{bs.get('limit')} terpakai" if c == 200 else f"ERR {c}"
+    if c == 200 and (bs.get("used") or 0) < (bs.get("limit") or 0):
+        sess = U.mining_sessions(acc)
+        if sess and sess[0].get("rate_per_hour"):
+            rate = float(sess[0]["rate_per_hour"])
+            bc, br = U.rpc(acc, "apply_mining_boost",
+                           {"p_boosted_rate": round(rate * 2, 6), "p_duration_ms": 3600000,
+                            "p_multiplier": 2, "p_session_id": sess[0]["id"]})
+            if bc == 200:
+                seg = ((br or {}).get("segments") or [{}])[-1]
+                row["boost"] = f"aktif x2 → {seg.get('ratePerHour', round(rate * 2, 3))}/h (1 jam)"
+            else:
+                row["boost"] = f"gagal {json.dumps(br)[:60]}"
+
+    # --- room: room activity unlocks extra rate; once_room mission pays 30
+    p0 = U.profile(acc)
+    if not p0.get("room_id"):
+        room = U.get_setting("room_id")
+        if not room:
+            rc, rr = U.rpc(acc, "create_room", {"p_name": "rizvan-crew"})
+            room = (rr or {}).get("room_id") if rc == 200 else None
+            if room:
+                U.set_setting("room_id", room)
+        if room:
+            sc, sr = U.rpc(acc, "switch_room", {"new_room_id": room, "p_join_pin": None})
+            row["room"] = f"join {room[-6:]}" if sc == 200 else f"gagal {json.dumps(sr)[:50]}"
+
     # --- daily bonus
     code, st = U.rpc(acc, "get_daily_bonus_status")
     if code == 200 and not st.get("claimed_today"):
@@ -156,6 +186,10 @@ def digest(rows):
         if r.get("device") and r["device"] != "bound":
             out.append(f"   ⚠️ device binding: {r['device']}")
         out.append(f"   bonus {r.get('daily_bonus')} · box {r.get('lucky_box')} · missions {r.get('missions')}")
+        if r.get("boost"):
+            out.append(f"   ⚡ boost {r['boost']}")
+        if r.get("room"):
+            out.append(f"   🏠 room {r['room']}")
         out.append(f"   mining: {r.get('mining')}")
     return "\n".join(out)
 
