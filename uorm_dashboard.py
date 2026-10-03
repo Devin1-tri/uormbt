@@ -70,8 +70,11 @@ def snapshot(label, acc):
     """Everything the dashboard shows for one account."""
     row = {"label": label, "ok": False}
     try:
-        U.ensure_token(acc, label)
+        # read-only: the dashboard must NOT refresh tokens (the runner owns them) —
+        # two refreshers rotate the same refresh token and one update gets lost.
         p = U.profile(acc)
+        if not p:
+            raise RuntimeError("token expired/kosong — runner akan refresh di cycle berikutnya")
         exp = U.token_exp(acc)
         row["token"] = f"{int((exp - time.time()) / 60)}m" if exp else "?"
         row.update(coins=p.get("total_coins"), rank=p.get("rank_id"), streak=p.get("streak_count"),
@@ -196,7 +199,8 @@ def run_cycle(rows_before, labels=None):
                     deltas[lb] = f"+{gain}"
         except Exception as e:  # noqa: BLE001
             results[lb] = f"ERROR {type(e).__name__}: {e}"
-    U.save_accounts(accs)
+    # NB: accounts.json is written by the routine (uorm_lib.update_account, locked).
+    # Writing our stale snapshot here would clobber rotated refresh tokens.
     return results, deltas
 
 

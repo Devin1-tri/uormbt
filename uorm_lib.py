@@ -27,13 +27,45 @@ ACCOUNTS = os.path.join(HERE, "accounts.json")
 
 
 # ---------------------------------------------------------------- accounts
+LOCK = os.path.join(HERE, ".accounts.lock")
+
+
+def _flock():
+    """Serialise accounts.json writers: the dashboard and the runner both touch it,
+    and a lost update breaks the (rotating) refresh-token chain."""
+    import fcntl
+    f = open(LOCK, "w")
+    fcntl.flock(f, fcntl.LOCK_EX)
+    return f
+
+
 def load_accounts():
     return json.load(open(ACCOUNTS)) if os.path.exists(ACCOUNTS) else {}
 
 
 def save_accounts(d):
-    json.dump(d, open(ACCOUNTS, "w"), indent=1)
-    os.chmod(ACCOUNTS, 0o600)
+    f = _flock()
+    try:
+        tmp = ACCOUNTS + ".tmp"
+        json.dump(d, open(tmp, "w"), indent=1)
+        os.replace(tmp, ACCOUNTS)
+        os.chmod(ACCOUNTS, 0o600)
+    finally:
+        f.close()
+
+
+def update_account(label, acc):
+    """Persist ONE account's tokens without clobbering the others (locked read-modify-write)."""
+    f = _flock()
+    try:
+        cur = json.load(open(ACCOUNTS)) if os.path.exists(ACCOUNTS) else {}
+        cur[label] = acc
+        tmp = ACCOUNTS + ".tmp"
+        json.dump(cur, open(tmp, "w"), indent=1)
+        os.replace(tmp, ACCOUNTS)
+        os.chmod(ACCOUNTS, 0o600)
+    finally:
+        f.close()
 
 
 def anon_headers():
@@ -132,7 +164,8 @@ def token_exp(acc):
         return None
 
 
-def refresh(acc):
+def refresh(acc, label=None):
+    """Rotate the access token. Persisted immediately (a lost update = dead token chain)."""
     r = _retry(lambda: requests.post(SUPA + "/auth/v1/token?grant_type=refresh_token",
                                      headers=anon_headers(), json={"refresh_token": acc["refresh_token"]},
                                      timeout=20))
@@ -141,7 +174,36 @@ def refresh(acc):
         acc["access_token"] = d["access_token"]
         acc["refresh_token"] = d.get("refresh_token", acc["refresh_token"])
         acc["refreshed"] = time.time()
-    return acc
+        if label:
+            update_account(label, acc)
+        return acc
+    raise RuntimeError(f"refresh {r.status_code}: {r.text[:120]}")
+
+
+def otp_login(acc, label=None):
+    """Last-resort recovery when the refresh token chain is broken: OTP by e-mail."""
+    t0 = time.time()
+    r = _retry(lambda: requests.post(SUPA + "/auth/v1/otp", headers=anon_headers(),
+                                     json={"email": acc["email"], "create_user": True}, timeout=25))
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"otp send {r.status_code}: {r.text[:120]}")
+    code = imap_otp(acc["email"], t0 - 30, timeout=240)
+    if not code:
+        raise RuntimeError("otp tidak masuk (kuota mailer?)")
+    last = None
+    for typ in ("email", "magiclink", "signup"):
+        rr = requests.post(SUPA + "/auth/v1/verify", headers=anon_headers(),
+                           json={"type": typ, "email": acc["email"], "token": code}, timeout=30)
+        if rr.status_code == 200 and rr.json().get("access_token"):
+            d = rr.json()
+            acc["access_token"] = d["access_token"]
+            acc["refresh_token"] = d.get("refresh_token") or acc.get("refresh_token")
+            acc["refreshed"] = time.time()
+            if label:
+                update_account(label, acc)
+            return acc
+        last = f"{typ}:{rr.status_code} {rr.text[:80]}"
+    raise RuntimeError(f"otp verify gagal ({last})")
 
 
 def signin(acc):
@@ -156,30 +218,24 @@ def signin(acc):
 
 
 def ensure_token(acc, label=None):
-    """Make sure acc['access_token'] works; refresh proactively, then on 401, then sign in."""
+    """Make sure acc['access_token'] works: proactive refresh → 401 refresh → OTP recovery."""
+    probe = lambda: _retry(lambda: requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1",
+                                                headers=headers(acc), timeout=20))  # noqa: E731
     exp = token_exp(acc)
     if exp and exp - time.time() < 900:          # renew well before expiry (Supabase auth blips)
         try:
-            refresh(acc)
+            refresh(acc, label)
         except Exception:  # noqa: BLE001
             pass
-    r = _retry(lambda: requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1",
-                                    headers=headers(acc), timeout=20))
-    if r.status_code == 200:
+    if probe().status_code == 200:
         return acc
-    try:
-        refresh(acc)
-    except Exception:  # noqa: BLE001
-        pass
-    r = _retry(lambda: requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1",
-                                    headers=headers(acc), timeout=20))
-    if r.status_code == 200:
-        return acc
-    signin(acc)
-    if label:
-        accs = load_accounts()
-        accs[label] = acc
-        save_accounts(accs)
+    for step in (refresh, otp_login):            # refresh may be dead → fall back to an e-mail OTP
+        try:
+            step(acc, label)
+        except Exception:  # noqa: BLE001
+            continue
+        if probe().status_code == 200:
+            return acc
     return acc
 
 

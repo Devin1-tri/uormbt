@@ -141,6 +141,9 @@ def run_account(label, acc):
 def digest(rows):
     out = ["⛏️ UORM daily · " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())]
     for r in rows:
+        if r.get("disabled"):
+            out.append(f"• {r['label']}: ⏸ MATI — {r['disabled']}")
+            continue
         if r.get("error"):
             out.append(f"❌ {r['label']}: {r['error']}")
             continue
@@ -191,11 +194,16 @@ def main(labels=None):
         if not acc:
             rows.append({"label": lb, "error": "unknown account label"})
             continue
+        if acc.get("disabled"):
+            rows.append({"label": lb, "disabled": acc.get("disabled_reason", "-")})
+            continue
         try:
             rows.append(run_account(lb, acc))
         except Exception as e:  # noqa: BLE001
             rows.append({"label": lb, "error": f"{type(e).__name__}: {e}"})
-    U.save_accounts(accs)
+    for _lb in labels:
+        if _lb in accs:
+            U.update_account(_lb, accs[_lb])   # per-account write, no clobber
     failed = [r["label"] for r in rows if r.get("error") and r["label"] in accs]
     if failed and not NO_RETRY:
         print(f"↻ {len(failed)} akun gagal ({', '.join(failed)}) — coba lagi 4 menit lagi…", flush=True)
@@ -206,7 +214,9 @@ def main(labels=None):
                     rows[i] = run_account(r["label"], accs[r["label"]])
                 except Exception as e:  # noqa: BLE001
                     rows[i] = {"label": r["label"], "error": f"{type(e).__name__}"}
-        U.save_accounts(accs)
+        for _lb in labels:
+            if _lb in accs:
+                U.update_account(_lb, accs[_lb])
     text = digest(rows)
     first = next((accs[l] for l in labels if l in accs), None)
     changes = config_watch(first)
