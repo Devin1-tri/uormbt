@@ -18,6 +18,7 @@ sys.path.insert(0, HERE)
 import uorm_lib as U  # noqa: E402
 
 QUIET = "--quiet" in sys.argv
+NO_RETRY = "--no-retry" in sys.argv          # skip the second pass for failed accounts
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 BASE_RATE = 1.3          # mining.base_rate_per_hour from app_config
 CONFIG_WATCH = ["device.enforce", "device.block_other_login", "app.maintenance_mode",
@@ -31,7 +32,13 @@ def log(*a):
 
 def run_account(label, acc):
     row = {"label": label}
-    U.ensure_token(acc, label)
+    try:
+        U.ensure_token(acc, label)
+        exp = U.token_exp(acc)
+        row["token"] = f"ok ({int((exp - time.time()) / 60)}m sisa)" if exp else "ok"
+    except Exception as e:  # noqa: BLE001
+        row["token"] = f"ERR {type(e).__name__}"
+        row["error"] = f"auth gagal: {type(e).__name__}"
     try:
         c, r = U.ensure_device(acc)
         row["device"] = "bound" if c == 200 else f"{c} {json.dumps(r)[:60]}"
@@ -141,6 +148,8 @@ def digest(rows):
                    f"streak {r.get('streak')} · refs {r.get('refs')}")
         if r.get("warning"):
             out.append(f"   ⚠️ {r['warning']}")
+        if r.get("token"):
+            out.append(f"   🔑 token {r['token']}" + (f"   ⚠️ {r['error']}" if r.get("error") else ""))
         if r.get("device") and r["device"] != "bound":
             out.append(f"   ⚠️ device binding: {r['device']}")
         out.append(f"   bonus {r.get('daily_bonus')} · box {r.get('lucky_box')} · missions {r.get('missions')}")
@@ -187,6 +196,17 @@ def main(labels=None):
         except Exception as e:  # noqa: BLE001
             rows.append({"label": lb, "error": f"{type(e).__name__}: {e}"})
     U.save_accounts(accs)
+    failed = [r["label"] for r in rows if r.get("error") and r["label"] in accs]
+    if failed and not NO_RETRY:
+        print(f"↻ {len(failed)} akun gagal ({', '.join(failed)}) — coba lagi 4 menit lagi…", flush=True)
+        time.sleep(240)
+        for i, r in enumerate(rows):
+            if r.get("error") and r["label"] in failed:
+                try:
+                    rows[i] = run_account(r["label"], accs[r["label"]])
+                except Exception as e:  # noqa: BLE001
+                    rows[i] = {"label": r["label"], "error": f"{type(e).__name__}"}
+        U.save_accounts(accs)
     text = digest(rows)
     first = next((accs[l] for l in labels if l in accs), None)
     changes = config_watch(first)

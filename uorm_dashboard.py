@@ -72,6 +72,8 @@ def snapshot(label, acc):
     try:
         U.ensure_token(acc, label)
         p = U.profile(acc)
+        exp = U.token_exp(acc)
+        row["token"] = f"{int((exp - time.time()) / 60)}m" if exp else "?"
         row.update(coins=p.get("total_coins"), rank=p.get("rank_id"), streak=p.get("streak_count"),
                    level=p.get("level"), lifetime=p.get("lifetime_mined"),
                    email=acc.get("email", "").split("@")[0], ref_code=p.get("referral_code"))
@@ -121,7 +123,7 @@ def render(rows, st):
             continue
         title = f"  {r['label']}  ·  {r['coins']} coins  ·  {str(r['rank']).upper()}  ·  streak {r['streak']}"
         lines.append(c("│ ", "cyan") + c(fit(title, W - 2), "bold") + c("│", "cyan"))
-        sub1 = f"     {r.get('email','?')}@gmail.com   refs {r['refs']}   code {r.get('ref_code')}   lvl {r.get('level')}"
+        sub1 = f"     {r.get('email','?')}@gmail.com   refs {r['refs']}   code {r.get('ref_code')}   lvl {r.get('level')}   token {r.get('token','?')}"
         lines.append(c("│ ", "cyan") + c(fit(sub1, W - 2), "gray") + c("│", "cyan"))
         m = r.get("mining")
         if m:

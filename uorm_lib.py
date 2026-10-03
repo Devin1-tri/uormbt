@@ -109,9 +109,33 @@ def signup(alias_local, password=None, label=None):
     return acc
 
 
+def _retry(fn, attempts=4, backoff=(1, 3, 8, 15)):
+    """Run fn(), retrying transient network failures (Supabase auth has flaky minutes)."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last = e
+            if i < attempts - 1:
+                time.sleep(backoff[min(i, len(backoff) - 1)])
+    raise last
+
+
+def token_exp(acc):
+    """Expiry epoch of the current access token (JWT exp), or None."""
+    try:
+        p = acc["access_token"].split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p)).get("exp")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def refresh(acc):
-    r = requests.post(SUPA + "/auth/v1/token?grant_type=refresh_token", headers=anon_headers(),
-                      json={"refresh_token": acc["refresh_token"]}, timeout=30)
+    r = _retry(lambda: requests.post(SUPA + "/auth/v1/token?grant_type=refresh_token",
+                                     headers=anon_headers(), json={"refresh_token": acc["refresh_token"]},
+                                     timeout=20))
     if r.status_code == 200:
         d = r.json()
         acc["access_token"] = d["access_token"]
@@ -132,12 +156,23 @@ def signin(acc):
 
 
 def ensure_token(acc, label=None):
-    """Make sure acc['access_token'] works; refresh/sign-in as needed."""
-    r = requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1", headers=headers(acc), timeout=20)
+    """Make sure acc['access_token'] works; refresh proactively, then on 401, then sign in."""
+    exp = token_exp(acc)
+    if exp and exp - time.time() < 900:          # renew well before expiry (Supabase auth blips)
+        try:
+            refresh(acc)
+        except Exception:  # noqa: BLE001
+            pass
+    r = _retry(lambda: requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1",
+                                    headers=headers(acc), timeout=20))
     if r.status_code == 200:
         return acc
-    refresh(acc)
-    r = requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1", headers=headers(acc), timeout=20)
+    try:
+        refresh(acc)
+    except Exception:  # noqa: BLE001
+        pass
+    r = _retry(lambda: requests.get(SUPA + "/rest/v1/profiles?select=id&limit=1",
+                                    headers=headers(acc), timeout=20))
     if r.status_code == 200:
         return acc
     signin(acc)
@@ -150,7 +185,11 @@ def ensure_token(acc, label=None):
 
 # ---------------------------------------------------------------- game RPCs
 def rpc(acc, name, payload=None):
-    r = requests.post(f"{SUPA}/rest/v1/rpc/{name}", headers=headers(acc), json=payload or {}, timeout=30)
+    try:
+        r = _retry(lambda: requests.post(f"{SUPA}/rest/v1/rpc/{name}", headers=headers(acc),
+                                         json=payload or {}, timeout=25))
+    except Exception as e:  # noqa: BLE001
+        return 0, {"_net_error": type(e).__name__}
     try:
         return r.status_code, r.json()
     except Exception:
