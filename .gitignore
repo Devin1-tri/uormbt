@@ -1,5 +1,6 @@
 # secrets / runtime state — never commit
 accounts.json
+accounts.json.bak-*
 config.json
 gmail_creds.json
 state.json
