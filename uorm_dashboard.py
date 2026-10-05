@@ -22,7 +22,8 @@ sys.path.insert(0, HERE)
 import uorm_lib as U  # noqa: E402
 import uorm_daily as D  # noqa: E402
 
-INTERVAL_H = float(os.environ.get("INTERVAL_H", "6"))
+INTERVAL_H = float(os.environ.get("INTERVAL_H", "3"))   # 3h: claims land within <=3h of the
+# 24h mark and the 4h lucky box is caught more often than with a 6h cycle.
 REFRESH_S = float(os.environ.get("REFRESH_S", "30"))
 STATE = os.path.join(HERE, "state.json")
 USE_COLOR = os.environ.get("NO_COLOR", "") == "" and sys.stdout.isatty()
@@ -70,11 +71,18 @@ def snapshot(label, acc):
     """Everything the dashboard shows for one account."""
     row = {"label": label, "ok": False}
     try:
-        # read-only: the dashboard must NOT refresh tokens (the runner owns them) —
-        # two refreshers rotate the same refresh token and one update gets lost.
+        # A stale token used to be a hard error here. uorm_lib.refresh() now holds the
+        # accounts lock across the whole rotation, so refreshing from the dashboard is
+        # safe (the old "lost update" race is fixed at the source).
         p = U.profile(acc)
         if not p:
-            raise RuntimeError("token expired/kosong — runner akan refresh di cycle berikutnya")
+            try:
+                U.ensure_token(acc, label)
+            except Exception as e:  # noqa: BLE001
+                print(f"[{label}] ensure_token: {e}")
+            p = U.profile(acc)
+        if not p:
+            raise RuntimeError("profil tak terbaca (token/login) — lihat log runner")
         exp = U.token_exp(acc)
         row["token"] = f"{int((exp - time.time()) / 60)}m" if exp else "?"
         row.update(coins=p.get("total_coins"), rank=p.get("rank_id"), streak=p.get("streak_count"),

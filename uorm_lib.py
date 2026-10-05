@@ -30,13 +30,38 @@ ACCOUNTS = os.path.join(HERE, "accounts.json")
 LOCK = os.path.join(HERE, ".accounts.lock")
 
 
+_LOCKSTATE = {"fh": None, "n": 0}
+
+
+class _LockHandle:
+    """Decrements on close; releases the flock only when the outermost holder exits."""
+
+    def close(self):
+        import fcntl
+        _LOCKSTATE["n"] -= 1
+        if _LOCKSTATE["n"] <= 0:
+            try:
+                fcntl.flock(_LOCKSTATE["fh"], fcntl.LOCK_UN)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                _LOCKSTATE["fh"].close()
+            except Exception:  # noqa: BLE001
+                pass
+            _LOCKSTATE["fh"] = None
+            _LOCKSTATE["n"] = 0
+
+
 def _flock():
-    """Serialise accounts.json writers: the dashboard and the runner both touch it,
-    and a lost update breaks the (rotating) refresh-token chain."""
+    """Serialise accounts.json writers (dashboard + runner). Reentrant: nested calls
+    share one fd, because flock is per open-file-description and a second open()
+    in the same process would deadlock itself."""
     import fcntl
-    f = open(LOCK, "w")
-    fcntl.flock(f, fcntl.LOCK_EX)
-    return f
+    if _LOCKSTATE["fh"] is None:
+        _LOCKSTATE["fh"] = open(LOCK, "w")
+        fcntl.flock(_LOCKSTATE["fh"], fcntl.LOCK_EX)
+    _LOCKSTATE["n"] += 1
+    return _LockHandle()
 
 
 def load_accounts():
@@ -183,27 +208,38 @@ def token_exp(acc):
 
 
 def refresh(acc, label=None):
-    """Rotate the access token. Persisted immediately (a lost update = dead token chain).
-    Also picks up a token another process rotated since we loaded the file."""
-    if label:
-        try:
-            disk = (load_accounts().get(label) or {})
-        except Exception:  # noqa: BLE001
-            disk = {}
-        if disk.get("refresh_token") and (disk.get("refreshed") or 0) > (acc.get("refreshed") or 0):
-            acc.update({k: disk[k] for k in ("access_token", "refresh_token", "refreshed") if k in disk})
-    r = _retry(lambda: requests.post(SUPA + "/auth/v1/token?grant_type=refresh_token",
-                                     headers=anon_headers(), json={"refresh_token": acc["refresh_token"]},
-                                     timeout=20))
-    if r.status_code == 200:
-        d = r.json()
-        acc["access_token"] = d["access_token"]
-        acc["refresh_token"] = d.get("refresh_token", acc["refresh_token"])
-        acc["refreshed"] = time.time()
+    """Rotate the access token. The WHOLE read->HTTP->write cycle runs under the
+    accounts lock: two processes reusing one rotating refresh token (old bug) is
+    what killed a2/t1's chain. If another process already rotated since we loaded
+    the file, adopt its token instead of rotating again."""
+    f = _flock()
+    try:
         if label:
-            update_account(label, acc)
-        return acc
-    raise RuntimeError(f"refresh {r.status_code}: {r.text[:120]}")
+            try:
+                disk = (load_accounts().get(label) or {})
+            except Exception:  # noqa: BLE001
+                disk = {}
+            if disk.get("refresh_token") and (disk.get("refreshed") or 0) > (acc.get("refreshed") or 0):
+                acc.update({k: disk[k] for k in ("access_token", "refresh_token", "refreshed") if k in disk})
+                dexp = token_exp(acc)
+                if dexp and dexp - time.time() > 600:      # someone else already did the work
+                    return acc
+        if not acc.get("refresh_token"):
+            raise RuntimeError("refresh_token kosong")
+        r = _retry(lambda: requests.post(SUPA + "/auth/v1/token?grant_type=refresh_token",
+                                         headers=anon_headers(), json={"refresh_token": acc["refresh_token"]},
+                                         timeout=20))
+        if r.status_code == 200:
+            d = r.json()
+            acc["access_token"] = d["access_token"]
+            acc["refresh_token"] = d.get("refresh_token", acc["refresh_token"])
+            acc["refreshed"] = time.time()
+            if label:
+                update_account(label, acc)
+            return acc
+        raise RuntimeError(f"refresh {r.status_code}: {r.text[:120]}")
+    finally:
+        f.close()
 
 
 def otp_login(acc, label=None):
