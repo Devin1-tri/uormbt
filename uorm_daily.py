@@ -53,16 +53,34 @@ def run_account(label, acc):
     row["boost"] = f"{bs.get('used')}/{bs.get('limit')} terpakai" if c == 200 else f"ERR {c}"
     if c == 200 and (bs.get("used") or 0) < (bs.get("limit") or 0):
         sess = U.mining_sessions(acc)
+        # A cold cycle (fresh start / the cycle right after a payout) has no live session, so
+        # the boost silently no-op'd and both 2× boosts went unused every day (digest read
+        # "0/2 terpakai"). Make sure a session exists first — the mining block below then sees
+        # it running and won't start a second one.
+        if not sess:
+            U.rpc(acc, "start_mining_session", {"p_rate_per_hour": BASE_RATE})
+            sess = U.mining_sessions(acc)
         if sess and sess[0].get("rate_per_hour"):
             rate = float(sess[0]["rate_per_hour"])
-            bc, br = U.rpc(acc, "apply_mining_boost",
-                           {"p_boosted_rate": round(rate * 2, 6), "p_duration_ms": 3600000,
-                            "p_multiplier": 2, "p_session_id": sess[0]["id"]})
-            if bc == 200:
-                seg = ((br or {}).get("segments") or [{}])[-1]
-                row["boost"] = f"aktif x2 → {seg.get('ratePerHour', round(rate * 2, 3))}/h (1 jam)"
+            # Don't burn a second boost while one is still running: the last segment holds the
+            # doubled rate for 3600 s. Without this, two runs minutes apart (a manual `once`
+            # right after a cycle, or a double-triggered cycle) consume BOTH daily boosts
+            # inside a single 1-hour window — measured 2026-10-06.
+            segs = sess[0].get("segments") or []
+            last = segs[-1] if segs else {}
+            active = (last.get("ratePerHour") or 0) > rate * 1.01 and \
+                (time.time() - (last.get("startedAt") or 0) / 1000.0) < 3600
+            if active:
+                row["boost"] = f"sudah aktif x2 → {last.get('ratePerHour')}/h (skip)"
             else:
-                row["boost"] = f"gagal {json.dumps(br)[:60]}"
+                bc, br = U.rpc(acc, "apply_mining_boost",
+                               {"p_boosted_rate": round(rate * 2, 6), "p_duration_ms": 3600000,
+                                "p_multiplier": 2, "p_session_id": sess[0]["id"]})
+                if bc == 200:
+                    seg = ((br or {}).get("segments") or [{}])[-1]
+                    row["boost"] = f"aktif x2 → {seg.get('ratePerHour', round(rate * 2, 3))}/h (1 jam)"
+                else:
+                    row["boost"] = f"gagal {json.dumps(br)[:60]}"
 
     # --- room: room activity unlocks extra rate; once_room mission pays 30
     p0 = U.profile(acc)
@@ -91,7 +109,7 @@ def run_account(label, acc):
         c, r = U.rpc(acc, "open_lucky_box")
         row["lucky_box"] = (r or {}).get("amount", r) if isinstance(r, dict) else r
     else:
-        row["lucky_box"] = f"cooldown {(st or {}).get('remaining_ms', '?')}" if code == 200 else f"ERR {code}"
+        row["lucky_box"] = f"cooldown {(st or {}).get('remaining_ms', '?')}ms" if code == 200 else f"ERR {code}"
 
     # --- missions: fully catalog-driven, so ANY mission the developers add later
     #     (new id, new type) is picked up automatically — nothing is hardcoded.
@@ -134,6 +152,7 @@ def run_account(label, acc):
     sessions = U.mining_sessions(acc)
     now = time.time()
     action, warn = [], None
+    running = False
     for s in sessions:
         t0 = datetime.datetime.fromisoformat(s["started_at"].replace("Z", "+00:00")).timestamp()
         dur = (s.get("session_duration_ms") or 86400000) / 1000.0
@@ -147,12 +166,24 @@ def run_account(label, acc):
                 c2, r2 = U.rpc(acc, "start_mining_session", {"p_rate_per_hour": BASE_RATE})
                 action.append(f"retry start -> {json.dumps(r2)[:80]}")
         else:
+            running = True
             c, r = U.rpc(acc, "refresh_mining_session_rate")
             action.append(f"running {s['id'][:8]} rate={(r or {}).get('rate_per_hour')}")
-    if not sessions:
-        c, r = U.rpc(acc, "start_mining_session", {"p_rate_per_hour": BASE_RATE})
-        action.append(f"started {json.dumps(r)[:110]}")
-        if c != 200:
+    # Start whenever nothing is RUNNING. The old guard was `if not sessions:` — on the very
+    # cycle that CLAIMS a payout the fetched list still holds that (just-claimed) row, so the
+    # guard never fired and mining sat idle until the NEXT cycle: up to 3 h of zero coins per
+    # 24 h payout. Operator caught it on the dashboard 2026-10-06 ("TIDAK ADA sesi aktif").
+    if not running:
+        r = None
+        for attempt in (1, 2, 3):
+            c, r = U.rpc(acc, "start_mining_session", {"p_rate_per_hour": BASE_RATE})
+            if c == 200:
+                action.append(f"started {json.dumps(r)[:110]}")
+                break
+            action.append(f"start try{attempt} gagal ({c}) -> {json.dumps(r)[:80]}")
+            if attempt < 3:
+                time.sleep(3 * attempt)
+        else:
             warn = f"gagal start mining: {json.dumps(r)[:80]}"
     row["mining"] = action
     if warn:
