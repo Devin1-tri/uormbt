@@ -82,6 +82,17 @@ def run_account(label, acc):
                 else:
                     row["boost"] = f"gagal {json.dumps(br)[:60]}"
 
+    # --- chat xp: profile.level is driven by profiles.xp, NOT coins/rank. Only
+    #     qualifying room messages award it (>=5 chars, >=4 letters, >=3 distinct),
+    #     20 qualifying msgs/day max for the room-activity score. Run before the
+    #     mining block so the chat-level rate bonus lands on the next session.
+    try:
+        import uorm_chat_xp
+        cx = uorm_chat_xp.run_daily(label)
+        row["chat_xp"] = f"{cx.get('count', 0)}/{uorm_chat_xp.DAILY_CAP} pesan"
+    except Exception as e:  # noqa: BLE001
+        row["chat_xp"] = f"ERR {type(e).__name__}: {e}"
+
     # --- room: room activity unlocks extra rate; once_room mission pays 30
     p0 = U.profile(acc)
     if not p0.get("room_id"):

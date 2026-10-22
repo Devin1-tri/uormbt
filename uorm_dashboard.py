@@ -118,56 +118,173 @@ def snapshot(label, acc):
     return row
 
 
-def render(rows, st):
-    W = 76
-    now = datetime.datetime.now()
-    nxt = st.get("next_cycle_ts")
-    lines = []
-    head = f"  UORM BOT · dashboard        {now:%Y-%m-%d %H:%M:%S} WIB"
-    lines.append(c("┌" + "─" * W + "┐", "cyan"))
-    lines.append(c("│", "cyan") + head.ljust(W) + c("│", "cyan"))
-    lines.append(c("├" + "─" * W + "┤", "cyan"))
+def _cells(text):
+    """Display width: emoji/wide codepoints take 2 columns."""
+    import unicodedata
+    n = 0
+    for ch in str(text):
+        if unicodedata.combining(ch):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
 
+
+def _strip(text):
+    import re
+    return re.sub(r"\033\[[0-9;]*m", "", str(text))
+
+
+def pad(text, width, align="left"):
+    """Pad a (possibly already coloured) cell to `width` visible columns."""
+    import re
+    text = str(text)
+    cur = _cells(_strip(text))
+    if cur > width:
+        # trim visible characters, keeping escape sequences intact, then add …
+        out, used, i = [], 0, 0
+        while i < len(text) and used < width - 1:
+            if text[i] == "\033":
+                j = text.find("m", i)
+                if j == -1:
+                    break
+                out.append(text[i:j + 1])
+                i = j + 1
+                continue
+            out.append(text[i])
+            used += 1
+            i += 1
+        tail = "" if re.search(r"\033\[0m$", text) else "\033[0m"
+        return "".join(out) + "…" + tail
+    fill = " " * (width - cur)
+    if align == "right":
+        return fill + text
+    if align == "center":
+        left = fill[: len(fill) // 2]
+        return left + text + fill[len(left):]
+    return text + fill
+
+
+def render(rows, st):
+    """Boxed table: one row per account, aligned columns, daemon footer.
+
+    Columns are fixed-width so numbers line up and the eye can scan down a
+    column. Width is chosen per terminal: the full table needs ~100 cols, a
+    phone terminal gets a compact table (label, coins, mining state) instead of
+    a broken box.
+    """
+    now = datetime.datetime.now()
+    import shutil
+    term = shutil.get_terminal_size((100, 30)).columns
+    wide = term >= 100
+
+    # (header, width, align)
+    if wide:
+        cols = [("akun", 6, "left"), ("coins", 11, "right"), ("rank", 9, "left"),
+                ("mining", 9, "left"), ("sisa", 9, "left"), ("box", 8, "left"),
+                ("check-in", 9, "left"), ("mission", 9, "center"), ("token", 5, "right")]
+    else:
+        cols = [("akun", 5, "left"), ("coins", 10, "right"),
+                ("mining", 9, "left"), ("sisa", 8, "left"), ("token", 6, "right")]
+    W = sum(w for _, w, _ in cols) + 3 * len(cols) + 1
+    SEP = c("│", "cyan")
+    lines = []
+
+    def rule(l, m, r):
+        return c(l + m.join("─" * (w + 2) for _, w, _ in cols) + r, "cyan")
+
+    def rowline(cells):
+        """cells = dict column->text (list juga boleh, dipetakan per posisi)."""
+        parts = []
+        for i, (name, w, align) in enumerate(cols):
+            if isinstance(cells, dict):
+                txt = cells.get(name, "")
+            else:
+                txt = cells[i] if i < len(cells) else ""
+            parts.append(pad(txt, w, align))
+        return c("│", "cyan") + " " + (" " + SEP + " ").join(parts) + " " + c("│", "cyan")
+
+    def panel(text, style=None):
+        body = pad(text, W - 2)
+        if style:
+            body = c(body, style)
+        return c("│", "cyan") + " " + body + " " + c("│", "cyan")
+
+    # ---- header -----------------------------------------------------------
+    lines.append(rule("┌", "┬", "┐"))
+    lines.append(panel(f"UORM BOT  ·  {now:%Y-%m-%d %H:%M:%S} WIB", "bold"))
+    lines.append(rule("├", "┼", "┤"))
+    lines.append(rowline([h for h, _, _ in cols]))
+    lines.append(rule("├", "┼", "┤"))
+
+    # ---- one row per account ---------------------------------------------
     for r in rows:
         if r.get("disabled"):
-            lines.append(c("│ ", "cyan") + c(fit(f"{r['label']}: ⏸ MATI — {r['disabled']}", W - 2), "yellow") + c("│", "cyan"))
+            lines.append(rowline({"akun": r["label"], "coins": c("MATI", "yellow"),
+                                  "mining": "-"}))
             continue
         if not r.get("ok"):
-            lines.append(c("│ ", "cyan") + c(f"{r['label']}: ERROR {r.get('error', 'unknown')}".ljust(W - 2), "red") + c("│", "cyan"))
+            lines.append(rowline({"akun": r["label"], "coins": c("ERROR", "red"),
+                                  "mining": "-"}))
             continue
-        title = f"  {r['label']}  ·  {r['coins']} coins  ·  {str(r['rank']).upper()}  ·  streak {r['streak']}"
-        lines.append(c("│ ", "cyan") + c(fit(title, W - 2), "bold") + c("│", "cyan"))
-        sub1 = f"     {r.get('email','?')}@gmail.com   refs {r['refs']}   code {r.get('ref_code')}   lvl {r.get('level')}   token {r.get('token','?')}"
-        lines.append(c("│ ", "cyan") + c(fit(sub1, W - 2), "gray") + c("│", "cyan"))
-        m = r.get("mining")
-        if m:
-            if m.get("overdue", 0) > 0:
-                mk = f"     ⚠ mining sesi lewat {m['overdue']}h — menunggu claim berhasil (rate {m['rate']}/h)"
-            else:
-                mk = f"     mining {m['rate']}/h x{m['mult']} · sisa {hms(m['left'])}"
-        else:
-            mk = "     mining: TIDAK ADA sesi aktif — akan di-start di cycle berikutnya"
-        lines.append(c("│ ", "cyan") + c(fit(mk, W - 2), "red" if (m and m.get("overdue", 0) > 0) else ("green" if m else "yellow")) + c("│", "cyan"))
-        bx = r.get("box")
-        bonus = r.get("bonus") or {}
-        info = (f"     lucky box {'siap dibuka' if (bx or 0) <= 0 else 'dalam ' + hms(bx)}"
-                f"   check-in hari {bonus.get('day')}/7 {'✅' if bonus.get('claimed') else '⏳'}")
-        lines.append(c("│ ", "cyan") + fit(info, W - 2) + c("│", "cyan"))
-        mi = r.get("missions") or {}
-        pend = ", ".join(mi.get("ready") or []) or "—"
-        lines.append(c("│ ", "cyan") + fit(f"     mission {mi.get('done', '?')}/{mi.get('total', '?')} claimed · siap di-claim: {pend}", W - 2) + c("│", "cyan"))
-        lines.append(c("├" + "─" * W + "┤", "cyan"))
 
-    cyc = st.get("cycles", 0)
-    last = st.get("last_cycle_utc") or "-"
+        m = r.get("mining")
+        if not m:
+            mk, left = c("IDLE", "yellow"), "-"
+        elif m.get("overdue", 0) > 0:
+            mk, left = c("LEWAT", "red"), c(f"{m['overdue']}h", "red")
+        else:
+            mk, left = c(f"x{m.get('mult') or 1}", "green"), hms(m.get("left"))
+
+        bx = r.get("box") or 0
+        box_txt = c("siap", "green") if bx <= 0 else hms(bx)
+        bonus = r.get("bonus") or {}
+        ci = c(f"{bonus.get('day')}/7 ok", "green") if bonus.get("claimed") \
+            else c(f"{bonus.get('day')}/7 -", "yellow")
+        mi = r.get("missions") or {}
+        ready = len(mi.get("ready") or [])
+        mis = c(f"{mi.get('done', '?')}/{mi.get('total', '?')}", "green")
+        if ready:
+            mis += c(f" +{ready}", "yellow")
+
+        coins = r.get("coins")
+        coins_txt = f"{float(coins):.2f}" if isinstance(coins, (int, float)) else str(coins)
+        cells = {"akun": r["label"], "coins": coins_txt,
+                 "rank": str(r.get("rank") or "?").upper()[:9], "mining": mk,
+                 "sisa": left, "box": box_txt, "check-in": ci, "mission": mis,
+                 "token": str(r.get("token", "?"))}
+        lines.append(rowline(cells))
+
+    lines.append(c("├" + "┴".join("─" * (w + 2) for _, w, _ in cols) + "┤", "cyan"))
+
+    # ---- detail per account (second box) ---------------------------------
+    detail = []
+    for r in rows:
+        if not r.get("ok"):
+            detail.append(c(f"  {r['label']:<4} ", "bold")
+                          + c(f"{r.get('error') or r.get('disabled') or 'tidak terbaca'}",
+                              "red"))
+            continue
+        detail.append(c(f"  {r['label']:<4} ", "bold")
+                      + c(f"{r.get('email', '?')}@gmail.com  ·  code {r.get('ref_code')}  ·  "
+                          f"refs {r.get('refs')}  ·  lvl {r.get('level')}"
+                          + (f"  ·  {mi.get('ready')}" if False else ""), "gray"))
+    if detail:
+        lines.append(c("┌" + "─" * (W - 2) + "┐", "cyan"))
+        for d in detail:
+            lines.append(c("│", "cyan") + pad(d, W - 2) + c("│", "cyan"))
+        lines.append(c("└" + "─" * (W - 2) + "┘", "cyan"))
+
+    # ---- footer, no box --------------------------------------------------
+    nxt = st.get("next_cycle_ts")
     res = st.get("last_result") or "-"
     deltas = st.get("last_deltas") or {}
-    dtxt = "  ".join(f"{k} {('+' + str(v)) if isinstance(v, (int, float)) and v else v}" for k, v in deltas.items()) or "-"
-    lines.append(c("│ ", "cyan") + f"  daemon: tiap {INTERVAL_H:g} jam · cycle ke-{cyc} · refresh {REFRESH_S:g}s".ljust(W - 2) + c("│", "cyan"))
-    lines.append(c("│ ", "cyan") + fit(f"  cycle terakhir: {last} · {res}", W - 2) + c("│", "cyan"))
-    lines.append(c("│ ", "cyan") + fit(f"  perubahan: {dtxt}", W - 2) + c("│", "cyan"))
-    nxt_txt = f"  cycle berikutnya: {datetime.datetime.fromtimestamp(nxt):%H:%M:%S} (dalam {hms(nxt - time.time())})" if nxt else "  cycle berikutnya: jalankan sekarang…"
-    lines.append(c("│ ", "cyan") + c(fit(nxt_txt, W - 2), "yellow") + c("│", "cyan"))
+    dtxt = "  ".join(f"{k} {v}" for k, v in deltas.items()) or "-"
+    lines.append("")
+    lines.append(c(f" cycle ke-{st.get('cycles', 0)}  ·  tiap {INTERVAL_H:g}j  ·  "
+                   f"terakhir {st.get('last_cycle_utc') or '-'}  ·  {res}", "gray"))
+    if nxt:
+        lines.append(c(f" berikutnya {datetime.datetime.fromtimestamp(nxt):%H:%M:%S} "
+                       f"(dalam {hms(nxt - time.time())})  ·  perubahan {dtxt}", "yellow"))
     scfg = st.get("config") or {}
     if scfg:
         short = [("device.enforce", "anti-bot"), ("app.maintenance_mode", "maintenance"),
@@ -179,10 +296,8 @@ def render(rows, st):
                 if isinstance(v, bool):
                     v = "ON" if v else "off"
                 parts.append(f"{label}={v}")
-        lines.append(c("│ ", "cyan") + c(fit("  server: " + " · ".join(parts), W - 2), "gray") + c("│", "cyan"))
-    lines.append(c("├" + "─" * W + "┤", "cyan"))
-    lines.append(c("│ ", "cyan") + c(fit("  Ctrl+C = stop bot (tetap di screen)  ·  ./uorm.sh start = jalankan lagi", W - 2), "gray") + c("│", "cyan"))
-    lines.append(c("└" + "─" * W + "┘", "cyan"))
+        lines.append(c(" server: " + " · ".join(parts), "gray"))
+    lines.append(c(" Ctrl+C = stop bot (tetap di screen)  ·  ./uorm.sh start = jalankan lagi", "gray"))
     return "\n".join(lines)
 
 
@@ -244,7 +359,8 @@ def main():
                 print(c("\n  ⏳ menjalankan cycle rutin...\n", "yellow"), flush=True)
                 results, deltas = run_cycle(rows, labels)
                 st["cycles"] = st.get("cycles", 0) + 1
-                st["last_cycle_utc"] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+                st["last_cycle_utc"] = datetime.datetime.now(
+                    datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 st["last_result"] = "; ".join(f"{k}:{v}" for k, v in results.items())
                 st["last_deltas"] = deltas
                 st["next_cycle_ts"] = time.time() + INTERVAL_H * 3600
